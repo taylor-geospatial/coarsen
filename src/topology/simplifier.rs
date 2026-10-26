@@ -1,10 +1,16 @@
-//! TaggedLinesSimplifier and ComponentJumpChecker, GEOS 3.13.1 encounter order.
-use crate::geom::{Bounds, Item, Packed, Point, orient};
-use crate::line_math::{crossing, distance, furthest, invalid_intersection};
-use crate::simple_geom::{RING, Shape};
+//! `TaggedLinesSimplifier` and `ComponentJumpChecker`, GEOS 3.13.1 encounter order.
+use super::{
+    segment::{crossing, distance, furthest, invalid_intersection},
+    shape::{Kind, Shape},
+};
+use crate::{
+    geom::{Bounds, Dims, Point},
+    index::{BoundsEntry, PackedTree},
+    predicates::orient,
+};
 use rstar::RTree;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Segment {
     a: Point,
     b: Point,
@@ -15,12 +21,15 @@ impl Segment {
         Self { a, b, output: None }
     }
     fn bounds(self) -> Bounds {
-        Bounds::points([self.a, self.b])
+        Bounds::from_points([self.a, self.b])
     }
     fn intersects(self, other: Self) -> bool {
         invalid_intersection(self.a, self.b, other.a, other.b)
     }
 }
+/// A tagged line: input points, the minimum output size, the index of its first
+/// segment in [`Simplifier::input`], and the simplified segments so far.
+#[derive(Debug)]
 struct Line {
     points: Vec<Point>,
     ring: bool,
@@ -40,45 +49,64 @@ impl Line {
         self.result.first().map_or(self.points[1], |s| s.a)
     }
 }
+/// An input segment: index `index` of line `line`.
+#[derive(Clone, Copy, Debug)]
+struct InputSegment {
+    segment: Segment,
+    line: usize,
+    index: usize,
+}
+/// Segments `start..end` of line `line`, which a candidate replaces.
+#[derive(Clone, Copy, Debug)]
+struct Span {
+    line: usize,
+    start: usize,
+    end: usize,
+}
+#[derive(Debug)]
 struct Simplifier {
     lines: Vec<Line>,
-    input: Vec<(Segment, usize, usize)>,
+    input: Vec<InputSegment>,
     alive: Vec<bool>,
-    packed: Packed,
+    packed: PackedTree,
     output: Vec<Segment>,
     output_alive: Vec<bool>,
-    tree: RTree<Item>,
+    tree: RTree<BoundsEntry>,
+}
+fn collect_lines(g: &Shape, lines: &mut Vec<Line>) {
+    if g.kind.is_linear() && !g.points.is_empty() {
+        lines.push(Line {
+            points: g.points.clone(),
+            ring: g.kind == Kind::LinearRing,
+            minimum: if g.points.first() == g.points.last() {
+                4
+            } else {
+                2
+            },
+            offset: 0,
+            result: Vec::new(),
+        });
+    }
+    for part in &g.parts {
+        collect_lines(part, lines);
+    }
 }
 impl Simplifier {
     fn new(g: &Shape) -> Self {
         let mut lines = Vec::new();
-        fn collect(g: &Shape, lines: &mut Vec<Line>) {
-            if (g.kind == 2 || g.kind == RING) && !g.points.is_empty() {
-                lines.push(Line {
-                    points: g.points.clone(),
-                    ring: g.kind == RING,
-                    minimum: if g.points.first() == g.points.last() {
-                        4
-                    } else {
-                        2
-                    },
-                    offset: 0,
-                    result: Vec::new(),
-                });
-            }
-            for part in &g.parts {
-                collect(part, lines);
-            }
-        }
-        collect(g, &mut lines);
+        collect_lines(g, &mut lines);
         let mut input = Vec::new();
         for (id, line) in lines.iter_mut().enumerate() {
             line.offset = input.len();
             for (i, p) in line.points.windows(2).enumerate() {
-                input.push((Segment::new(p[0], p[1]), id, i));
+                input.push(InputSegment {
+                    segment: Segment::new(p[0], p[1]),
+                    line: id,
+                    index: i,
+                });
             }
         }
-        let packed = Packed::new(input.iter().map(|(s, _, _)| s.bounds()));
+        let packed = PackedTree::new(input.iter().map(|s| s.segment.bounds()));
         Self {
             lines,
             alive: vec![true; input.len()],
@@ -94,13 +122,15 @@ impl Simplifier {
         s.output = Some(id);
         self.output.push(s);
         self.output_alive.push(true);
-        self.tree.insert(Item {
+        self.tree.insert(BoundsEntry {
             id,
             bounds: s.bounds(),
         });
         s
     }
-    fn valid(&self, s: Segment, exclude: Option<(usize, usize, usize)>) -> bool {
+    /// Whether `s` crosses no live output segment and no live input segment
+    /// outside `exclude`.
+    fn valid(&self, s: Segment, exclude: Option<Span>) -> bool {
         if self
             .tree
             .locate_in_envelope_intersecting(s.bounds().aabb())
@@ -109,18 +139,24 @@ impl Simplifier {
             return false;
         }
         !self.packed.any(s.bounds(), |id| {
-            let (candidate, line, index) = self.input[id];
+            let InputSegment {
+                segment,
+                line,
+                index,
+            } = self.input[id];
             if !self.alive[id] {
                 return false;
             }
-            if exclude.is_some_and(|(l, i, j)| l == line && i <= index && index < j) {
+            if exclude.is_some_and(|x| x.line == line && x.start <= index && index < x.end) {
                 return false;
             }
-            s.intersects(candidate)
+            s.intersects(segment)
         })
     }
+    /// `ComponentJumpChecker::hasJump`: whether replacing `points` with `flat`
+    /// would move another line's component point to the other side.
     fn jumps(&self, line: usize, points: &[Point], flat: Segment) -> bool {
-        let bounds = Bounds::points(points.iter().copied());
+        let bounds = Bounds::from_points(points.iter().copied());
         self.lines.iter().enumerate().any(|(id, other)| {
             if id == line {
                 return false;
@@ -161,7 +197,14 @@ impl Simplifier {
             let enough = line.size() >= line.minimum || depth + 1 >= line.minimum;
             if enough
                 && max <= tolerance
-                && self.valid(flat, Some((id, i, j)))
+                && self.valid(
+                    flat,
+                    Some(Span {
+                        line: id,
+                        start: i,
+                        end: j,
+                    }),
+                )
                 && !self.jumps(id, &line.points[i..=j], flat)
             {
                 let offset = self.lines[id].offset;
@@ -181,8 +224,9 @@ impl Simplifier {
         {
             return;
         }
-        let first = *line.result.first().unwrap();
-        let last = *line.result.last().unwrap();
+        let (Some(&first), Some(&last)) = (line.result.first(), line.result.last()) else {
+            return;
+        };
         let flat = Segment::new(last.a, first.b);
         if distance(first.a, flat.a, flat.b) > tolerance {
             return;
@@ -202,7 +246,7 @@ impl Simplifier {
         self.lines[id].result[0] = flat;
     }
     fn endpoint_jumps(&self, line: usize, a: Segment, b: Segment, flat: Segment) -> bool {
-        let bounds = Bounds::points([a.a, a.b, b.a, b.b]);
+        let bounds = Bounds::from_points([a.a, a.b, b.a, b.b]);
         self.lines.iter().enumerate().any(|(id, other)| {
             if id == line {
                 return false;
@@ -214,7 +258,9 @@ impl Simplifier {
         })
     }
 }
-pub fn simplify(g: Shape, tolerance: f64) -> Shape {
+/// GEOS `TopologyPreservingSimplifier`: simplifies every line and ring in `g`
+/// without introducing intersections or moving components across each other.
+pub(crate) fn simplify(g: Shape, tolerance: f64) -> Shape {
     if g.is_empty() {
         return g;
     }
@@ -222,32 +268,40 @@ pub fn simplify(g: Shape, tolerance: f64) -> Shape {
     for id in 0..simplifier.lines.len() {
         simplifier.simplify_line(id, tolerance);
     }
-    let mut lines = simplifier.lines.into_iter();
-    fn transform(mut g: Shape, lines: &mut impl Iterator<Item = Line>) -> Shape {
-        if g.kind == 2 || g.kind == RING {
-            if !g.points.is_empty() {
-                let line = lines.next().unwrap();
+    transform(g, &mut simplifier.lines.into_iter())
+}
+
+/// GEOS `GeometryTransformer`: rebuilds `g` from the simplified lines, in order,
+/// demoting short rings and invalid polygons as GEOS does.
+fn transform(mut g: Shape, lines: &mut impl Iterator<Item = Line>) -> Shape {
+    match g.kind {
+        Kind::LineString | Kind::LinearRing => {
+            if g.points.is_empty() {
+                g.dims = Dims::XY;
+            } else {
+                let line = lines.next().expect("one simplified line per nonempty line");
                 g.points = line.result.iter().map(|s| s.a).collect();
                 if let Some(s) = line.result.last() {
                     g.points.push(s.b);
                 }
-                g.inferred_dimensions();
-            } else {
-                g.dims = 0;
+                g.infer_dims();
             }
-            if g.kind == RING && !g.points.is_empty() && g.points.len() < 4 {
-                g.kind = 2;
+            if g.kind == Kind::LinearRing && !g.points.is_empty() && g.points.len() < 4 {
+                g.kind = Kind::LineString;
             }
-        } else if g.kind == 3 {
+        }
+        Kind::Polygon => {
             let mut parts = g.parts.into_iter().map(|p| transform(p, lines));
-            let shell = parts.next().unwrap_or_else(|| Shape::empty(RING, 0));
-            let mut valid = shell.kind == RING && !shell.is_empty();
+            let shell = parts
+                .next()
+                .unwrap_or_else(|| Shape::empty(Kind::LinearRing, Dims::XY));
+            let mut valid = shell.kind == Kind::LinearRing && !shell.is_empty();
             let mut components = vec![shell];
             for hole in parts {
                 if hole.is_empty() {
                     continue;
                 }
-                if hole.kind == RING {
+                if hole.kind == Kind::LinearRing {
                     components.push(hole);
                 } else {
                     valid = false;
@@ -255,25 +309,29 @@ pub fn simplify(g: Shape, tolerance: f64) -> Shape {
             }
             if valid {
                 g.parts = components;
-                g.dims = 0;
+                g.dims = Dims::XY;
             } else {
-                g = Shape::build(components, 7);
+                g = Shape::build(components, Kind::GeometryCollection);
             }
-        } else if g.kind >= 4 {
+        }
+        Kind::MultiPoint
+        | Kind::MultiLineString
+        | Kind::MultiPolygon
+        | Kind::GeometryCollection => {
             let parts: Vec<_> = g
                 .parts
                 .into_iter()
                 .map(|p| transform(p, lines))
                 .filter(|p| !p.is_empty())
                 .collect();
-            if g.kind == 7 {
+            if g.kind == Kind::GeometryCollection {
                 g.parts = parts;
-                g.dims = 0;
+                g.dims = Dims::XY;
             } else {
                 g = Shape::build(parts, g.kind);
             }
         }
-        g
+        Kind::Point => {}
     }
-    transform(g, &mut lines)
+    g
 }
