@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-26
 
 - Refactor the Rust core to BeautifulRust conventions and enforce its lints in CI.
   Python behavior, error messages, and output bytes are unchanged.

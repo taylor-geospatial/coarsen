@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "coarsen"
-version = "0.3.0"
+version = "0.4.0"
 description = "Parallel, topology-preserving geometry and polygon coverage simplification for Shapely"
 keywords = ["geospatial", "gis", "polygon", "simplification", "shapely", "topology", "rust"]
 readme = "README.md"
