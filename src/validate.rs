@@ -1,34 +1,93 @@
-//! GEOS CoveragePolygonValidator at gapWidth=0: matching, interactions, interiors.
-use crate::geom::{Bounds, Geometry, Item, Packed, Point, Ring, orient};
+//! GEOS `CoveragePolygonValidator` at `gapWidth=0`: matching, interactions, interiors.
+use crate::{
+    geom::{Bounds, Geometry, Point, Ring},
+    index::{BoundsEntry, PackedTree},
+    predicates::orient,
+};
 use rayon::prelude::*;
 use rstar::RTree;
 use rustc_hash::FxHashMap;
+use std::mem;
 
 type Key = ((u64, u64), (u64, u64));
 fn key(a: Point, b: Point) -> Key {
-    if a.compare(b).is_lt() {
+    if a.cmp_xy(b).is_lt() {
         (a.key(), b.key())
     } else {
         (b.key(), a.key())
     }
 }
+/// A deduplicated ring with a segment index; `right` when its interior lies to
+/// the right of its direction.
+#[derive(Debug)]
 struct IndexedRing {
     pts: Ring,
     right: bool,
-    index: Packed,
+    index: PackedTree,
     bounds: Bounds,
 }
+#[derive(Debug)]
 struct IndexedPolygon {
     rings: Vec<IndexedRing>,
     bounds: Bounds,
 }
+#[derive(Debug)]
 struct IndexedGeom {
     polys: Vec<IndexedPolygon>,
     bounds: Bounds,
 }
+impl IndexedRing {
+    /// Indexes the ring at `position` in its polygon; position 0 is the shell.
+    fn new(ring: &Ring, position: usize) -> Self {
+        let mut pts = ring.clone();
+        pts.dedup();
+        let index = PackedTree::new(
+            pts.windows(2)
+                .map(|w| Bounds::from_points(w.iter().copied())),
+        );
+        let bounds = Bounds::from_points(pts.iter().copied());
+        Self {
+            right: is_ccw(&pts) != (position == 0),
+            pts,
+            index,
+            bounds,
+        }
+    }
+}
+impl IndexedGeom {
+    fn new(g: &Geometry) -> Self {
+        let polys = g
+            .polygons()
+            .iter()
+            .map(|p| {
+                let rings: Vec<_> = p
+                    .rings()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| !r.is_empty())
+                    .map(|(i, r)| IndexedRing::new(r, i))
+                    .collect();
+                let bounds = rings.first().map_or(Bounds::default(), |r| r.bounds);
+                IndexedPolygon { rings, bounds }
+            })
+            .collect();
+        Self {
+            polys,
+            bounds: g.bounds(),
+        }
+    }
+}
 
-/// GEOS Orientation::isCCW cap algorithm (also defined for degenerate rings).
-pub fn ccw(r: &[Point]) -> bool {
+/// Where a point lies relative to a ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Location {
+    Exterior,
+    Boundary,
+    Interior,
+}
+
+/// GEOS `Orientation::isCCW` cap algorithm (also defined for degenerate rings).
+fn is_ccw(r: &[Point]) -> bool {
     if r.len() < 4 {
         return false;
     }
@@ -72,12 +131,12 @@ fn greater(o: Point, p: Point, q: Point) -> bool {
 fn interior(o: Point, mut a: Point, mut b: Point, p: Point) -> bool {
     let between = !greater(o, a, b);
     if !between {
-        std::mem::swap(&mut a, &mut b);
+        mem::swap(&mut a, &mut b);
     }
     (greater(o, p, a) && !greater(o, p, b)) == between
 }
 fn on(a: Point, b: Point, p: Point) -> bool {
-    Bounds::points([a, b]).contains(p) && orient(a, b, p) == 0
+    Bounds::from_points([a, b]).contains(p) && orient(a, b, p) == 0
 }
 fn interacting(a: Point, b: Point, r: &IndexedRing, j: usize) -> bool {
     let c = r.pts[j];
@@ -85,7 +144,7 @@ fn interacting(a: Point, b: Point, r: &IndexedRing, j: usize) -> bool {
     if a == b || c == d || key(a, b) == key(c, d) {
         return false;
     }
-    if !Bounds::points([a, b]).intersects(Bounds::points([c, d])) {
+    if !Bounds::from_points([a, b]).intersects(Bounds::from_points([c, d])) {
         return false;
     }
     let ac = orient(a, b, c);
@@ -116,16 +175,16 @@ fn interacting(a: Point, b: Point, r: &IndexedRing, j: usize) -> bool {
             return false;
         }
         if !r.right {
-            std::mem::swap(&mut prev, &mut next);
+            mem::swap(&mut prev, &mut next);
         }
         return interior(o, prev, next, p);
     }
     false
 }
-/// -1 exterior, 0 boundary, 1 interior. Indexed GEOS-style ray crossing.
-fn locate(p: Point, r: &IndexedRing) -> i32 {
+/// Indexed GEOS-style ray crossing.
+fn locate(p: Point, r: &IndexedRing) -> Location {
     if !r.bounds.contains(p) {
-        return -1;
+        return Location::Exterior;
     }
     let ray = Bounds {
         min: [p.x, p.y],
@@ -150,63 +209,33 @@ fn locate(p: Point, r: &IndexedRing) -> i32 {
         false
     });
     if boundary {
-        0
+        Location::Boundary
     } else if crossings % 2 == 1 {
-        1
+        Location::Interior
     } else {
-        -1
+        Location::Exterior
     }
 }
 fn contains(p: Point, poly: &IndexedPolygon) -> bool {
-    if !poly.bounds.contains(p) || poly.rings.is_empty() || locate(p, &poly.rings[0]) != 1 {
+    let Some((shell, holes)) = poly.rings.split_first() else {
         return false;
-    }
-    poly.rings[1..].iter().all(|r| locate(p, r) == -1)
+    };
+    poly.bounds.contains(p)
+        && locate(p, shell) == Location::Interior
+        && holes.iter().all(|r| locate(p, r) == Location::Exterior)
 }
 
+/// Flags each polygonal geometry that is invalid within the coverage: one with a
+/// duplicated or same-direction shared segment, or whose unmatched segments
+/// cross, touch the interior of, or lie inside a neighbor.
 pub fn invalid_mask(geoms: &[Geometry]) -> Vec<bool> {
-    let indexed: Vec<_> = geoms
-        .par_iter()
-        .map(|g| {
-            let polys = g
-                .polygons
-                .iter()
-                .map(|p| {
-                    let rings: Vec<_> = p
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, r)| !r.is_empty())
-                        .map(|(i, r)| {
-                            let mut pts = r.clone();
-                            pts.dedup();
-                            let index = Packed::new(
-                                pts.windows(2).map(|w| Bounds::points(w.iter().copied())),
-                            );
-                            let bounds = Bounds::points(pts.iter().copied());
-                            IndexedRing {
-                                right: ccw(&pts) != (i == 0),
-                                pts,
-                                index,
-                                bounds,
-                            }
-                        })
-                        .collect();
-                    let bounds = rings.first().map_or(Bounds::default(), |r| r.bounds);
-                    IndexedPolygon { rings, bounds }
-                })
-                .collect();
-            IndexedGeom {
-                polys,
-                bounds: g.bounds(),
-            }
-        })
-        .collect();
+    let indexed: Vec<_> = geoms.par_iter().map(IndexedGeom::new).collect();
     let tree = RTree::bulk_load(
         indexed
             .iter()
             .enumerate()
-            .filter(|(_, g)| !g.bounds.empty())
-            .map(|(id, g)| Item {
+            .filter(|(_, g)| !g.bounds.is_empty())
+            .map(|(id, g)| BoundsEntry {
                 id,
                 bounds: g.bounds,
             })
@@ -216,7 +245,7 @@ pub fn invalid_mask(geoms: &[Geometry]) -> Vec<bool> {
         .into_par_iter()
         .map(|id| {
             let g = &indexed[id];
-            if g.bounds.empty() {
+            if g.bounds.is_empty() {
                 return false;
             }
             let near: Vec<_> = tree
@@ -224,75 +253,80 @@ pub fn invalid_mask(geoms: &[Geometry]) -> Vec<bool> {
                 .filter(|v| v.id != id)
                 .map(|v| &indexed[v.id])
                 .collect();
-            let rings: Vec<_> = g.polys.iter().flat_map(|p| &p.rings).collect();
-            let mut targets = Vec::new();
-            let mut matches = Vec::new();
-            let mut map = FxHashMap::default();
-            for (ri, r) in rings.iter().enumerate() {
-                for i in 0..r.pts.len().saturating_sub(1) {
+            is_invalid(g, &near)
+        })
+        .collect()
+}
+
+/// A segment's direction relative to its ring interior, and its position in the
+/// target list.
+type SegmentSide = (bool, usize);
+
+fn is_invalid(g: &IndexedGeom, near: &[&IndexedGeom]) -> bool {
+    let rings: Vec<_> = g.polys.iter().flat_map(|p| &p.rings).collect();
+    let mut targets = Vec::new();
+    let mut matches = Vec::new();
+    let mut map: FxHashMap<Key, SegmentSide> = FxHashMap::default();
+    for (ri, r) in rings.iter().enumerate() {
+        for i in 0..r.pts.len().saturating_sub(1) {
+            let a = r.pts[i];
+            let b = r.pts[i + 1];
+            let dir = a.cmp_xy(b).is_lt() == r.right;
+            let k = key(a, b);
+            let pos = targets.len();
+            targets.push((ri, i));
+            matches.push(false);
+            if let Some(&(other, first)) = map.get(&k) {
+                if dir == other {
+                    return true;
+                }
+                matches[pos] = true;
+                matches[first] = true;
+            } else {
+                map.insert(k, (dir, pos));
+            }
+        }
+    }
+    for adj in near {
+        for p in &adj.polys {
+            for r in &p.rings {
+                let bad = r.index.any(g.bounds, |i| {
                     let a = r.pts[i];
                     let b = r.pts[i + 1];
-                    let dir = a.compare(b).is_lt() == r.right;
-                    let k = key(a, b);
-                    let pos = targets.len();
-                    targets.push((ri, i));
-                    matches.push(false);
-                    if let Some(&(other, first)) = map.get(&k) {
-                        if dir == other {
+                    if let Some(&(dir, pos)) = map.get(&key(a, b)) {
+                        if (a.cmp_xy(b).is_lt() == r.right) == dir {
                             return true;
                         }
                         matches[pos] = true;
-                        matches[first] = true;
-                    } else {
-                        map.insert(k, (dir, pos));
                     }
+                    false
+                });
+                if bad {
+                    return true;
                 }
             }
-            for adj in &near {
-                for p in &adj.polys {
-                    for r in &p.rings {
-                        let bad = r.index.any(g.bounds, |i| {
-                            let a = r.pts[i];
-                            let b = r.pts[i + 1];
-                            if let Some(&(dir, pos)) = map.get(&key(a, b)) {
-                                if (a.compare(b).is_lt() == r.right) == dir {
-                                    return true;
-                                }
-                                matches[pos] = true;
-                            }
-                            false
-                        });
-                        if bad {
-                            return true;
-                        }
-                    }
-                }
-            }
-            for (pos, &(ri, i)) in targets.iter().enumerate() {
-                if matches[pos] {
-                    continue;
-                }
-                let r = rings[ri];
-                let a = r.pts[i];
-                let b = r.pts[i + 1];
-                let env = Bounds::points([a, b]);
-                for adj in &near {
-                    for poly in &adj.polys {
-                        if !poly.bounds.intersects(env) {
-                            continue;
-                        }
-                        for ring in &poly.rings {
-                            if ring.index.any(env, |j| interacting(a, b, ring, j)) {
-                                return true;
-                            }
-                        }
-                        if contains(a, poly) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
+        }
+    }
+    targets
+        .iter()
+        .zip(&matches)
+        .filter(|(_, matched)| !**matched)
+        .any(|(&(ri, i), _)| {
+            let r = rings[ri];
+            unmatched_is_invalid(r.pts[i], r.pts[i + 1], near)
         })
-        .collect()
+}
+
+/// Whether an unmatched segment `a`→`b` interacts with or lies inside a neighbor.
+fn unmatched_is_invalid(a: Point, b: Point, near: &[&IndexedGeom]) -> bool {
+    let env = Bounds::from_points([a, b]);
+    near.iter()
+        .flat_map(|adj| &adj.polys)
+        .filter(|poly| poly.bounds.intersects(env))
+        .any(|poly| {
+            poly.rings
+                .iter()
+                .any(|ring| ring.index.any(env, |j| interacting(a, b, ring, j)))
+                || contains(a, poly)
+        })
 }

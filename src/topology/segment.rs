@@ -1,7 +1,11 @@
-//! GEOS 3.13.1 segment distance and topology predicates; arithmetic order matters.
-use crate::geom::{Bounds, Point, orient};
+//! GEOS 3.13.1 segment distance and intersection predicates; arithmetic order matters.
+use crate::{
+    geom::{Bounds, Point},
+    predicates::orient,
+};
 
-pub fn distance(p: Point, a: Point, b: Point) -> f64 {
+/// Distance from `p` to segment `a`→`b`.
+pub(crate) fn distance(p: Point, a: Point, b: Point) -> f64 {
     let point_distance = |a: Point, b: Point| {
         let dx = a.x - b.x;
         let dy = a.y - b.y;
@@ -23,7 +27,9 @@ pub fn distance(p: Point, a: Point, b: Point) -> f64 {
     let s = ((a.y - p.y) * dx - (a.x - p.x) * dy) / length;
     s.abs() * length.sqrt()
 }
-pub fn furthest(points: &[Point], i: usize, j: usize) -> (usize, f64) {
+/// Index and distance of the vertex strictly between `i` and `j` furthest from
+/// segment `i`→`j`; the first wins ties. Distance is `-1.0` when `j == i + 1`.
+pub(crate) fn furthest(points: &[Point], i: usize, j: usize) -> (usize, f64) {
     let (mut index, mut max) = (i, -1.0);
     for k in i + 1..j {
         let d = distance(points[k], points[i], points[j]);
@@ -34,12 +40,13 @@ pub fn furthest(points: &[Point], i: usize, j: usize) -> (usize, f64) {
     }
     (index, max)
 }
-pub fn invalid_intersection(a: Point, b: Point, c: Point, d: Point) -> bool {
+/// Whether segments `a`→`b` and `c`→`d` meet anywhere but a shared endpoint.
+pub(crate) fn invalid_intersection(a: Point, b: Point, c: Point, d: Point) -> bool {
     if (a == c && b == d) || (a == d && b == c) {
         return true;
     }
-    let ab = Bounds::points([a, b]);
-    let cd = Bounds::points([c, d]);
+    let ab = Bounds::from_points([a, b]);
+    let cd = Bounds::from_points([c, d]);
     if !ab.intersects(cd) {
         return false;
     }
@@ -64,7 +71,8 @@ pub fn invalid_intersection(a: Point, b: Point, c: Point, d: Point) -> bool {
     .into_iter()
     .any(|(p, o, env, x, y)| o == 0 && env.contains(p) && p != x && p != y)
 }
-pub fn crossing(p: Point, a: Point, b: Point) -> usize {
+/// `1` if the rightward ray from `p` crosses segment `a`→`b`, else `0`.
+pub(crate) fn crossing(p: Point, a: Point, b: Point) -> usize {
     if (a.x < p.x && b.x < p.x) || p == b || (a.y == p.y && b.y == p.y) {
         return 0;
     }
