@@ -12,6 +12,7 @@ check:
 	cargo fmt --check
 	cargo clippy --locked --all-targets --all-features -- -D warnings
 	cargo test --locked
+	RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
 	uv run --no-sync ruff check .
 	uv run --no-sync ruff format --check .
 	uv run --no-sync ty check

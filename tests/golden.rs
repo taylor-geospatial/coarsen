@@ -1,16 +1,23 @@
-use coarsen::{edges::Coverage, geom::Geometry, tpvw, validate, wkb};
+//! Byte parity against GEOS 3.13.1 fixtures and projected real parcels.
+use coarsen::{Boundary, Geometry, coverage_simplify, validate, wkb};
 
 fn unhex(s: &str) -> Vec<u8> {
     s.as_bytes()
         .chunks_exact(2)
-        .map(|v| u8::from_str_radix(std::str::from_utf8(v).unwrap(), 16).unwrap())
+        .map(|v| {
+            let digits = std::str::from_utf8(v).expect("hex is ASCII");
+            u8::from_str_radix(digits, 16).expect("fixture WKB is hex")
+        })
         .collect()
 }
 fn geometries(v: &serde_json::Value) -> Vec<Geometry> {
     v.as_array()
-        .unwrap()
+        .expect("fixture geometries are an array")
         .iter()
-        .map(|s| wkb::read(&unhex(s.as_str().unwrap())).unwrap())
+        .map(|s| {
+            let hex = s.as_str().expect("fixture geometries are hex strings");
+            wkb::read(&unhex(hex)).expect("fixture WKB decodes")
+        })
         .collect()
 }
 #[test]
@@ -35,11 +42,8 @@ fn geos_3131_golden_fixtures() {
                 .num_threads(threads)
                 .build()
                 .unwrap();
-            pool.install(|| {
-                let coverage = Coverage::extract(&input, &mask);
-                let (out, _) = tpvw::simplify(&coverage.edges, c["tolerance"].as_f64().unwrap());
-                coverage.rebuild(&mut actual, &mask, &out);
-            });
+            let tolerance = c["tolerance"].as_f64().unwrap();
+            pool.install(|| coverage_simplify(&mut actual, tolerance, Boundary::Simplify));
             let expected = geometries(&c["output"]);
             for (i, (a, b)) in actual.iter().zip(expected).enumerate() {
                 assert_eq!(
@@ -78,7 +82,7 @@ fn real_utm_fixtures() {
                 .build()
                 .unwrap();
             let mut result = input.clone();
-            pool.install(|| coarsen::coverage_simplify(&mut result, 5.0, true));
+            pool.install(|| coverage_simplify(&mut result, 5.0, Boundary::Simplify));
             for (actual, expected) in result.iter().zip(geometries(&case["output"])) {
                 assert_eq!(
                     wkb::write(actual),

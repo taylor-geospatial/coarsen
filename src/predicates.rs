@@ -1,7 +1,12 @@
-//! GEOS 3.13.1 CGAlgorithmsDD filter and DD arithmetic, operation order preserved.
+//! GEOS 3.13.1 `CGAlgorithmsDD` orientation with DD arithmetic, operation order
+//! preserved, and triangle predicates built on it.
 use crate::geom::Point;
 
-#[derive(Clone, Copy)]
+/// Dekker's splitter, `2^27 + 1`, which splits a double into two 26-bit halves.
+const SPLITTER: f64 = 134_217_729.0;
+
+/// A double-double: high and low parts of an unevaluated sum.
+#[derive(Clone, Copy, Debug)]
 struct Dd(f64, f64);
 impl Dd {
     fn add(self, b: Self) -> Self {
@@ -22,10 +27,10 @@ impl Dd {
         self.add(Self(-b.0, -b.1))
     }
     fn mul(self, b: Self) -> Self {
-        let c = 134217729.0 * self.0;
+        let c = SPLITTER * self.0;
         let hx = c - (c - self.0);
         let tx = self.0 - hx;
-        let c = 134217729.0 * b.0;
+        let c = SPLITTER * b.0;
         let hy = c - (c - b.0);
         let ty = b.0 - hy;
         let product = self.0 * b.0;
@@ -38,7 +43,9 @@ impl Dd {
 fn sign(x: f64) -> i32 {
     if x < 0.0 { -1 } else { i32::from(x > 0.0) }
 }
-pub fn orient(a: Point, b: Point, c: Point) -> i32 {
+/// Orientation of `c` relative to the directed line `a`→`b`: `1` counterclockwise,
+/// `-1` clockwise, `0` collinear. Returned as a sign so callers can multiply results.
+pub(crate) fn orient(a: Point, b: Point, c: Point) -> i32 {
     let left = (a.x - c.x) * (b.y - c.y);
     let right = (a.y - c.y) * (b.x - c.x);
     let det = left - right;
@@ -69,4 +76,13 @@ pub fn orient(a: Point, b: Point, c: Point) -> i32 {
     } else {
         i32::from(d.0 > 0.0 || (d.0 == 0.0 && d.1 > 0.0))
     }
+}
+/// Whether `p` lies inside or on triangle `a`, `b`, `c`.
+pub(crate) fn triangle_contains(a: Point, b: Point, c: Point, p: Point) -> bool {
+    let exterior = if orient(a, b, c) > 0 { -1 } else { 1 };
+    orient(a, b, p) != exterior && orient(b, c, p) != exterior && orient(c, a, p) != exterior
+}
+/// Area of triangle `a`, `b`, `c`.
+pub(crate) fn triangle_area(a: Point, b: Point, c: Point) -> f64 {
+    (((c.x - a.x) * (b.y - a.y) - (b.x - a.x) * (c.y - a.y)) / 2.0).abs()
 }
