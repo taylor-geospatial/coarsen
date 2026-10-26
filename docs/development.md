@@ -22,12 +22,15 @@ The parity gate requires the Shapely 2.1.2 wheel with GEOS 3.13.1.
 | --- | --- |
 | `python/coarsen/` | Broadcasting, Shapely conversion, metadata restoration |
 | `src/python.rs` | Owned WKB boundary and GIL release |
-| `src/wkb.rs`, `src/simple_geom.rs` | Bounded geometry decoding and encoding |
+| `src/wkb/`, `src/topology/wkb.rs` | Bounded geometry decoding and encoding; typed `WkbError` |
 | `src/edges.rs`, `src/tpvw.rs` | Shared-edge extraction and ordered parallel simplification |
-| `src/topology.rs` | Topology-preserving simplification of individual geometries |
-| `src/geom.rs`, `src/predicates.rs`, `src/line_math.rs` | Spatial indexing and predicates |
+| `src/topology/` | Topology-preserving simplification of individual geometries (`python` feature) |
+| `src/geom.rs`, `src/index.rs` | Polygonal storage, bounds, and spatial indexes |
+| `src/predicates.rs`, `src/topology/segment.rs` | GEOS orientation, distance, and intersection predicates |
 | `src/validate.rs` | Rust coverage validation; not a Python invalid-edges API |
 
+Rust style follows [BeautifulRust](https://github.com/morganlinton/BeautifulRust);
+its lints live in `Cargo.toml` and `clippy.toml`, and `make check` denies warnings.
 Preserve encounter order and floating-point arithmetic when changing the GEOS
 ports. A mathematically equivalent rewrite can change byte parity. Test a proposed
 performance change against the reference before claiming a speedup.

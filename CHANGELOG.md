@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Refactor the Rust core to BeautifulRust conventions and enforce its lints in CI.
+  Python behavior, error messages, and output bytes are unchanged.
+- Rust API: `coverage_simplify` takes `Boundary::{Simplify, Preserve}` instead of a
+  `bool`; `Geometry` is a `Polygon`/`MultiPolygon` enum with accessors; WKB errors
+  are a typed `WkbError`; internal modules (`edges`, `tpvw`, `topology`) are private.
+- Drop the `anyhow` dependency.
+
 ## 0.3.0 — 2026-10-01
 
 - Reject malformed short lines, unclosed rings, and invalid multi-geometry members
