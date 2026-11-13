@@ -1,5 +1,10 @@
 # Changelog
 
+
+## 0.5.0
+
+- Add opt-in raster_pixel_size to smooth complementary pixel staircases in Rust before coverage simplification.
+
 ## 0.4.0 — 2026-10-26
 
 - Refactor the Rust core to BeautifulRust conventions and enforce its lints in CI.

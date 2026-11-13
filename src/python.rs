@@ -109,7 +109,7 @@ fn topology_wkb(
 }
 
 #[pyfunction]
-#[pyo3(signature = (inputs, tolerance, simplify_boundary, threads=None))]
+#[pyo3(signature = (inputs, tolerance, simplify_boundary, threads=None, raster_pixel_size=None))]
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "mirrors the Python keyword argument"
@@ -120,6 +120,7 @@ fn simplify_wkb(
     tolerance: f64,
     simplify_boundary: bool,
     threads: Option<usize>,
+    raster_pixel_size: Option<f64>,
 ) -> PyResult<Vec<Bound<'_, PyBytes>>> {
     if threads == Some(0) {
         return Err(value_error("threads must be positive"));
@@ -135,6 +136,14 @@ fn simplify_wkb(
                 .par_iter()
                 .map(|b| wkb::read(b).map_err(value_error))
                 .collect::<PyResult<Vec<_>>>()?;
+            if let Some(pixel) = raster_pixel_size {
+                if !pixel.is_finite() || pixel <= 0.0 || !simplify_boundary {
+                    return Err(value_error("raster_pixel_size requires a positive finite size and simplify_boundary=True"));
+                }
+                if tolerance > 0.0 {
+                    crate::raster::smooth(&mut geometries, pixel);
+                }
+            }
             coverage_simplify(&mut geometries, tolerance, boundary);
             Ok(geometries.par_iter().map(wkb::write).collect::<Vec<_>>())
         })
@@ -142,8 +151,8 @@ fn simplify_wkb(
     Ok(result.iter().map(|b| PyBytes::new(py, b)).collect())
 }
 
-#[pymodule]
-fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(name = "_core")]
+fn core_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(simplify_wkb, module)?)?;
     module.add_function(wrap_pyfunction!(topology_wkb, module)?)?;
     Ok(())

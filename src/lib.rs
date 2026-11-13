@@ -29,6 +29,8 @@ mod predicates;
 #[cfg(feature = "python")]
 mod python;
 #[cfg(feature = "python")]
+mod raster;
+#[cfg(feature = "python")]
 mod topology;
 mod tpvw;
 pub mod validate;
