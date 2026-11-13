@@ -151,8 +151,8 @@ fn simplify_wkb(
     Ok(result.iter().map(|b| PyBytes::new(py, b)).collect())
 }
 
-#[pymodule]
-fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(name = "_core")]
+fn core_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(simplify_wkb, module)?)?;
     module.add_function(wrap_pyfunction!(topology_wkb, module)?)?;
     Ok(())
