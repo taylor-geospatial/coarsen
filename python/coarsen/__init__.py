@@ -12,7 +12,7 @@ from ._core import simplify_wkb
 from ._simplify import simplify
 
 __all__ = ['coverage_simplify', 'simplify']
-__version__ = '0.4.0'
+__version__ = '0.5.0'
 
 
 @overload
@@ -22,6 +22,7 @@ def coverage_simplify(
     *,
     simplify_boundary: bool = True,
     threads: int | None = None,
+    raster_pixel_size: float | None = None,
 ) -> Geometry: ...
 
 
@@ -32,6 +33,7 @@ def coverage_simplify(
     *,
     simplify_boundary: bool = True,
     threads: int | None = None,
+    raster_pixel_size: float | None = None,
 ) -> npt.NDArray[np.object_]: ...
 
 
@@ -41,6 +43,7 @@ def coverage_simplify(
     *,
     simplify_boundary: bool = True,
     threads: int | None = None,
+    raster_pixel_size: float | None = None,
 ) -> Geometry | npt.NDArray[np.object_]:
     """Simplify a polygonal coverage with shared edges kept identical.
 
@@ -49,6 +52,10 @@ def coverage_simplify(
     original shape (or a Geometry for scalar Geometry input), like Shapely 2.1.
     With simplify_boundary=False, simplify only edges used by exactly two rings.
     Threads must be a positive integer or None (Rayon's default pool).
+
+    raster_pixel_size opts into smoothing paired pixel staircases before simplification.
+    Use only for valid XY cell polygons on one axis-aligned raster in its native CRS.
+    This cartographic operation can change gap widths and point contacts.
 
     The input should form a valid coverage; invalid inputs are not repaired.
     This is the GEOS 3.13.1 algorithm; later GEOS releases can produce other bytes.
@@ -77,7 +84,7 @@ def coverage_simplify(
         raise TypeError('tolerance must be numeric and simplify_boundary must be boolean')
     output = []
     for tol, boundary in zip(tolerances.flat, boundaries.flat):
-        output.extend(simplify_wkb(encoded, float(tol), bool(boundary), threads))
+        output.extend(simplify_wkb(encoded, float(tol), bool(boundary), threads, raster_pixel_size))
     parts = shapely.from_wkb(np.asarray(output, dtype=object)).reshape(array.shape)
     precision = shapely.get_precision(flat[kinds != -1])
     if np.any(precision > 0):

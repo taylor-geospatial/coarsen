@@ -3,6 +3,7 @@ def simplify_wkb(
     tolerance: float,
     simplify_boundary: bool,
     threads: int | None = None,
+    raster_pixel_size: float | None = None,
 ) -> list[bytes]: ...
 def topology_wkb(
     inputs: list[bytes],

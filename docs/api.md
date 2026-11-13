@@ -85,3 +85,15 @@ The wrapper copies geometry pointers and WKB before releasing the GIL. Parsing,
 index construction, and simplification run in Rust without the GIL; Python/Shapely
 conversion still costs time and memory. Coverage inputs cannot be arbitrarily
 chunked without losing shared-edge constraints across chunks.
+
+### Diagonal raster staircases
+
+For outlines from a single square-pixel label raster, pass the native pixel size
+in projected coordinate units, e.g. `coverage_simplify(parcels, 5, raster_pixel_size=2.5)`.
+The Rust pass pairs complementary pixel steps by exact diagonal endpoints. On
+consecutive steps in the same direction between two parcels it replaces turns
+with segment midpoints before normal coverage simplification. It preserves gaps
+between these banks while allowing their width and corner contacts to change.
+Use valid XY cell polygons with axes parallel to the coordinate axes. Holes
+and junctions with a third parcel are protected. Leave the argument unset for
+GEOS-compatible results, or when the grid or the meaning of gaps is unknown.
