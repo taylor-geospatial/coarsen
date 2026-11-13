@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib"]
 python = ["dep:pyo3"]
 
 [dependencies]
-pyo3 = { version = "0.29.3", optional = true, features = ["abi3-py310", "extension-module"] }
+pyo3 = { version = "0.30.1", optional = true, features = ["abi3-py310", "extension-module"] }
 rayon = "1.12"
 rstar = "0.13"
 rustc-hash = "2"
